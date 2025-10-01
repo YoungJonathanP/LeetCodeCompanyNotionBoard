@@ -1,0 +1,58 @@
+# -----------------------------
+# Python
+# -----------------------------
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pdb
+*.egg-info/
+.eggs/
+.build/
+dist/
+*.so
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+*.env.bak
+
+# Byte-compiled / caches
+*.py[cod]
+*$py.class
+
+# -----------------------------
+# OS files
+# -----------------------------
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# -----------------------------
+# Editor files
+# -----------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# -----------------------------
+# Project-specific
+# -----------------------------
+companies/
+
+# Local env & secrets
+.env
+dbmap.json
+
+# Logs & debug dumps
+*.log
+debug_*.json
+debug_*.html
+
+# Local test data / snapshots
+*.json.backup
+data/
+snapshots/

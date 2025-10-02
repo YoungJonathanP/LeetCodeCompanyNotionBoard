@@ -287,44 +287,109 @@ def load_window_jsons(base_dir: str) -> Tuple[Optional[dict], Optional[dict], Op
 # DB mapping
 # ---------------------------
 
+def _load_mapping() -> Dict[str, Any]:
+    """Load mapping from NOTION_DB_MAP (JSON string or file path) or NOTION_DB_MAP_FILE."""
+    env_map_str = os.environ.get("NOTION_DB_MAP")
+    env_map_file = os.environ.get("NOTION_DB_MAP_FILE")
+
+    # Prefer explicit file if set
+    if env_map_file and os.path.exists(env_map_file):
+        try:
+            with open(env_map_file, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            warn(f"Failed to read NOTION_DB_MAP_FILE: {e}")
+
+    # If NOTION_DB_MAP is set, accept either inline JSON or a path to a .json
+    if env_map_str:
+        try:
+            if env_map_str.lower().endswith(".json") and os.path.exists(env_map_str):
+                with open(env_map_str, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            return json.loads(env_map_str)
+        except Exception as e:
+            warn(f"Failed to parse NOTION_DB_MAP (as JSON or file): {e}")
+
+    return {}
+
+def _coerce_db_id(entry: Any) -> Optional[str]:
+    """Accept either a string DB id or an object with {'db': '...'}."""
+    if isinstance(entry, str):
+        return entry
+    if isinstance(entry, dict):
+        dbid = entry.get("db")
+        if isinstance(dbid, str) and dbid:
+            return dbid
+    return None
+
 def resolve_database_id_for_company(company: Optional[str], cli_db: Optional[str]) -> str:
     """
     Priority:
       1) --database-id (explicit override)
-      2) --db-map (JSON file mapping), or NOTION_DB_MAP (JSON string) → use match for company
+      2) NOTION_DB_MAP/NOTION_DB_MAP_FILE → match for company (supports flat or nested schema)
       3) NOTION_DATABASE_ID (fallback)
     """
-    # 1) explicit CLI always wins
-    if cli_db: 
+    if cli_db:
         return cli_db
 
-    # 2) env JSON map (string) or file path
-    env_map_str = os.environ.get("NOTION_DB_MAP")  # JSON string (e.g. {"Meta":"xxxx","Google":"yyyy"})
-    env_map_file = os.environ.get("NOTION_DB_MAP_FILE")  # path to JSON file
-
-    mapping: Dict[str, str] = {}
-    if env_map_str:
-        try:
-            mapping = json.loads(env_map_str)
-        except Exception as e:
-            warn(f"Failed to parse NOTION_DB_MAP JSON: {e}")
-    elif env_map_file and os.path.exists(env_map_file):
-        try:
-            with open(env_map_file, "r", encoding="utf-8") as f:
-                mapping = json.load(f)
-        except Exception as e:
-            warn(f"Failed to read NOTION_DB_MAP_FILE: {e}")
+    mapping = _load_mapping()
 
     if company and mapping:
-        db = mapping.get(company) or mapping.get(company.lower()) or mapping.get(company.title())
-        if db:
-            return db
+        # Try exact, lower, and title-case keys
+        for key in (company, company.lower(), company.title()):
+            if key in mapping:
+                dbid = _coerce_db_id(mapping[key])
+                if dbid:
+                    return dbid
+                else:
+                    warn(f"Mapping for '{key}' exists but does not contain a valid DB id.")
 
-    # 3) final fallback
     fallback = os.environ.get("NOTION_DATABASE_ID")
-    if not fallback:
-        raise RuntimeError("No database id found. Provide --database-id, or set NOTION_DB_MAP / NOTION_DB_MAP_FILE, or NOTION_DATABASE_ID.")
-    return fallback
+    if fallback:
+        return fallback
+
+    raise RuntimeError(
+        "No database id found. Provide --database-id, or set NOTION_DB_MAP / NOTION_DB_MAP_FILE, "
+        "or NOTION_DATABASE_ID."
+    )
+# def resolve_database_id_for_company(company: Optional[str], cli_db: Optional[str]) -> str:
+#     """
+#     Priority:
+#       1) --database-id (explicit override)
+#       2) --db-map (JSON file mapping), or NOTION_DB_MAP (JSON string) → use match for company
+#       3) NOTION_DATABASE_ID (fallback)
+#     """
+#     # 1) explicit CLI always wins
+#     if cli_db: 
+#         return cli_db
+
+#     # 2) env JSON map (string) or file path
+#     env_map_str = os.environ.get("NOTION_DB_MAP")  # JSON string (e.g. {"Meta":"xxxx","Google":"yyyy"})
+#     env_map_file = os.environ.get("NOTION_DB_MAP_FILE")  # path to JSON file
+
+#     mapping: Dict[str, str] = {}
+#     if env_map_str:
+#         try:
+#             mapping = json.loads(env_map_str)
+#         except Exception as e:
+#             warn(f"Failed to parse NOTION_DB_MAP JSON: {e}")
+#     elif env_map_file and os.path.exists(env_map_file):
+#         try:
+#             with open(env_map_file, "r", encoding="utf-8") as f:
+#                 mapping = json.load(f)
+#         except Exception as e:
+#             warn(f"Failed to read NOTION_DB_MAP_FILE: {e}")
+
+#     if company and mapping:
+#         db = mapping.get(company) or mapping.get(company.lower()) or mapping.get(company.title())
+#         if db[db]:
+#             return db
+
+#     # 3) final fallback
+#     fallback = os.environ.get("NOTION_DATABASE_ID")
+#     if not fallback:
+#         raise RuntimeError("No database id found. Provide --database-id, or set NOTION_DB_MAP / NOTION_DB_MAP_FILE, or NOTION_DATABASE_ID.")
+#     return fallback
 
 # ---------------------------
 # CLI

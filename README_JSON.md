@@ -1,4 +1,3 @@
-
 # Import LeetCode JSON → Notion (enhanced)
 
 Adds:
@@ -10,13 +9,16 @@ Adds:
 
 ## Notion properties to create
 - **Name** (Title)
-- **Slug** (Rich text)
 - **Difficulty** (Select)
-- **Frequency Window** (Multi-select)
-- **Frequency** (Number)
-- **Acceptance Rate** (Number)
 - **Topic Tags** (Multi-select)
+- **Freq 30d** (Number)
+- **Freq 90d** (Number)
+- **Freq 180d** (Number)
+- **Acceptance Rate** (Number)
 - **Last Attempted** (Date)
+
+Or duplicate my Template
+https://trapezoidal-dash-803.notion.site/280d7fb3bcac806d9bf3fb0fbee58281?v=280d7fb3bcac81deb102000c7bf08238
 
 ## .env
 ```

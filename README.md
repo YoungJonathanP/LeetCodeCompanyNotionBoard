@@ -76,6 +76,7 @@ Defines **aliases** (local folder names) → LeetCode slugs + Notion DB IDs.
 - **Freq 180d** (Number)
 - **Acceptance Rate** (Number)
 - **Last Attempted** (Date)
+- **Company** (Select)
 
 Or duplicate my Template
 https://trapezoidal-dash-803.notion.site/280d7fb3bcac806d9bf3fb0fbee58281?v=280d7fb3bcac81deb102000c7bf08238
@@ -140,7 +141,7 @@ If today’s folder already contains all 3 JSONs, the pull is skipped.
 
 ---
 
-### 3. Import into Notion (Only if questions have been pulled)
+### 3. Import a single company into Notion
 ```bash
 python notion_company_snapshot_import.py ./companies/Meta --company Meta
 ```

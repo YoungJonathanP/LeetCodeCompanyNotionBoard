@@ -56,3 +56,17 @@ debug_*.html
 *.json.backup
 data/
 snapshots/
+
+# -----------------------------
+# Testing & deprecated files
+# -----------------------------
+baseline_test.py
+notion_company_snapshot_import.py
+performance_baseline.md
+performance_comparison.md
+performance_evaluation.md
+IMPLEMENTATION_SUMMARY.md
+README_JSON.md
+
+# AI collaboration files
+CLAUDE.md

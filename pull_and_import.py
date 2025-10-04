@@ -44,57 +44,70 @@ def run(cmd: list[str]) -> int:
 
 def main():
     load_dotenv()
-    ap = argparse.ArgumentParser(description="Login → Pull JSON → Import to Notion")
+    ap = argparse.ArgumentParser(description="Pull from LeetCode → Generate Master → Upload to Notion")
     ap.add_argument("--dbmap", default=os.getenv("NOTION_DB_MAP_FILE", "./dbmap.json"))
     ap.add_argument("--companies", required=True, help="Comma-separated display names that exist in dbmap.json, e.g. 'Meta, Amazon'")
     ap.add_argument("--date", help="YYYY-MM-DD (default=today)")
     ap.add_argument("--root", default=os.getenv("COMPANIES_ROOT", "companies"))
-    ap.add_argument("--dry-run-import", action="store_true", help="Pass --dry-run to the Notion importer step")
+    ap.add_argument("--top-n", type=int, default=100, help="Number of top questions to pull (default=100)")
+    ap.add_argument("--dry-run", action="store_true", help="Dry-run mode for upload (skip actual Notion writes)")
     args = ap.parse_args()
 
     dbmap = load_dbmap(args.dbmap)
     selected = parse_companies_arg(args.companies, dbmap)
     date_str = args.date or datetime.date.today().isoformat()
 
-    # 1) Login + Pull (always requires login; handled by leetcode_pull.py)
+    print(f"=== Pull and Import Workflow ===")
+    print(f"Companies: {', '.join(selected.keys())}")
+    print(f"Date: {date_str}")
+    print(f"Top N questions: {args.top_n}")
+    print()
+
+    # Step 1: Pull from LeetCode
+    print("[Step 1/3] Pulling from LeetCode...")
     pull_cmd = [
         sys.executable, "leetcode_pull.py",
         "--dbmap", args.dbmap,
         "--companies", ",".join(selected.keys()),
         "--root", args.root,
-        "--date", date_str
+        "--date", date_str,
+        "--top-n", str(args.top_n)
     ]
     rc = run(pull_cmd)
     if rc != 0:
         sys.exit(rc)
 
-    # 2) Import to Notion per company (auto-picks latest date via your importer)
-    for display, meta in selected.items():
-        company_root = Path(args.root) / display
-        latest = latest_date_folder(company_root)
-        if not latest:
-            print(f"[WARN] No snapshot folder found for {display} under {company_root}, skipping import")
-            continue
-        # If a specific date was requested, ensure we're importing that date
-        if args.date and latest.name != date_str:
-            intended = company_root / date_str
-            if not intended.exists():
-                print(f"[WARN] Requested date {date_str} not found for {display}, skipping import")
-                continue
-            latest = intended
+    # Step 2: Generate master.json files
+    print("\n[Step 2/3] Generating master.json files...")
+    generate_cmd = [
+        sys.executable, "generate_master.py",
+        "--companies", ",".join(selected.keys()),
+        "--root", args.root,
+        "--date", date_str
+    ]
+    rc = run(generate_cmd)
+    if rc != 0:
+        print(f"[WARN] Master generation failed (exit {rc})", file=sys.stderr)
+        sys.exit(rc)
 
-        importer_cmd = [
-            sys.executable, "notion_company_snapshot_import.py",
-            str(company_root), "--company", display
-        ]
-        if args.dry_run_import:
-            importer_cmd.append("--dry-run")
+    # Step 3: Upload to Notion (new optimized system)
+    print("\n[Step 3/3] Uploading to Notion...")
+    upload_cmd = [
+        sys.executable, "upload.py",
+        "--companies", ",".join(selected.keys()),
+        "--date", date_str,
+        "--adapter", "notion"
+    ]
+    if args.dry_run:
+        upload_cmd.append("--dry-run")
 
-        rc2 = run(importer_cmd)
-        if rc2 != 0:
-            print(f"[WARN] Import step failed for {display} (exit {rc2})", file=sys.stderr)
+    rc = run(upload_cmd)
+    if rc != 0:
+        print(f"[WARN] Upload step failed (exit {rc})", file=sys.stderr)
+        sys.exit(rc)
 
-    print("All done.")
+    print("\n=== All done ===")
+    print(f"Successfully processed {len(selected)} companies for {date_str}")
 
 if __name__ == "__main__":
     main()

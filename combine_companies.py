@@ -15,19 +15,17 @@ from notion_client import Client
 # Configuration / Property Names
 # ---------------------------
 
-# Combined DB property names (edit these to match your Combined Notion DB)
-PROP_TITLE           = "Name"                 # Title (hyperlinked "{id}. {Title}")
-PROP_SLUG            = "Slug"                 # Rich text (preferred unique key)
-PROP_DIFFICULTY      = "Difficulty"           # Select
-PROP_TOPIC_TAGS      = "Topic Tags"           # Multi-select
-PROP_ACCEPT_RATE     = "Acceptance Rate"      # Number (percent 0..100, optional)
+# Combined DB property names (matching user's database schema)
+PROP_TITLE           = "Name"                 # Title (hyperlinked "{frontendId}. {Title}")
+PROP_DIFFICULTY      = "Difficulty"           # Select (mode or highest frequency source)
+PROP_TOPIC_TAGS      = "Topic Tags"           # Multi-select (union across companies)
+PROP_ACCEPT_RATE     = "Acceptance Rate"      # Number (percent 0..100, static per question)
 PROP_COMPANIES       = "Companies"            # Multi-select (which companies contributed)
-PROP_COMPANY_COUNT   = "Companies Count"      # Number (N selected)
-PROP_FREQ30_AVG      = "Freq 30d Avg"         # Number
-PROP_FREQ90_AVG      = "Freq 90d Avg"         # Number
-PROP_FREQ180_AVG     = "Freq 180d Avg"        # Number
-PROP_OVERALL_SCORE   = "Overall Score"        # Number (for sorting)
-PROP_LAST_COMBINED   = "Last Combined At"     # Date (now)
+PROP_FREQ30_AVG      = "Freq 30d Avg"         # Number (average with missing = 0)
+PROP_FREQ90_AVG      = "Freq 90d Avg"         # Number (average with missing = 0)
+PROP_FREQ180_AVG     = "Freq 180d Avg"        # Number (average with missing = 0)
+PROP_RELEVANCE_SCORE = "Relevance Score"      # Number (0.5*30d + 0.3*90d + 0.2*180d)
+PROP_LAST_COMPUTED   = "Last Computed"        # Date (when row was last updated)
 
 URL_PREFIX = "https://leetcode.com/problems/"
 
@@ -123,8 +121,49 @@ def normalize_acceptance(ac: Any) -> Optional[float]:
         return None
 
 def read_company_snapshot(company_display: str, date_dir: Path) -> Dict[str, dict]:
-    """Return mapping: slug_or_normtitle -> per-problem dict with window frequencies and metadata.
-       Missing files are treated as empty (zeros)."""
+    """
+    Read master.json from company date directory.
+    Returns mapping: slug_or_normtitle -> per-problem dict with window frequencies and metadata.
+
+    If master.json doesn't exist, falls back to reading 30d/90d/180d.json files.
+    """
+    master_path = date_dir / "master.json"
+
+    # Prefer master.json if it exists
+    if master_path.exists():
+        try:
+            master = load_json(master_path)
+            questions = master.get("questions", {})
+            out = {}
+
+            for slug, q in questions.items():
+                key = slug or normalize_title(q.get("title", ""))
+                if not key:
+                    continue
+
+                diff = q.get("difficulty")
+                if isinstance(diff, str):
+                    diff = diff.title()
+
+                out[key] = {
+                    "slug": q.get("slug"),
+                    "title": q.get("title", ""),
+                    "url": q.get("url"),
+                    "frontend_id": str(q.get("frontend_id")) if q.get("frontend_id") is not None else None,
+                    "difficulty": diff,
+                    "topic_tags": q.get("topic_tags", []),
+                    "ac": q.get("acceptance_rate"),
+                    "freq_30": float(q.get("freq_30d", 0)),
+                    "freq_90": float(q.get("freq_90d", 0)),
+                    "freq_180": float(q.get("freq_180d", 0)),
+                }
+
+            return out
+        except Exception as e:
+            warn(f"{company_display}: failed to load master.json from {date_dir}: {e}")
+            # Fall through to legacy method
+
+    # Legacy: read from 30d/90d/180d.json files
     files = {
         "30d": date_dir / "30d.json",
         "90d": date_dir / "90d.json",
@@ -232,24 +271,6 @@ def title_rich_text(frontend_id: Optional[str], title: str, url: Optional[str]) 
     link = {"url": url} if url else None
     return [{"type": "text", "text": {"content": text_content, "link": link}}]
 
-def find_page_by_slug(notion: Client, database_id: str, slug: Optional[str]) -> Optional[str]:
-    if not slug:
-        return None
-    try:
-        resp = notion.databases.query(
-            database_id=database_id,
-            filter={
-                "property": PROP_SLUG,
-                "rich_text": {"equals": slug}
-            },
-            page_size=1,
-        )
-        results = resp.get("results", [])
-        return results[0]["id"] if results else None
-    except Exception as e:
-        warn(f"Query by slug failed: {e}")
-        return None
-
 def find_page_by_title(notion: Client, database_id: str, title_text: str) -> Optional[str]:
     try:
         resp = notion.databases.query(
@@ -266,65 +287,75 @@ def find_page_by_title(notion: Client, database_id: str, title_text: str) -> Opt
         warn(f"Query by title failed: {e}")
         return None
 
-def build_props_for_combined(row: ProblemAgg, include_companies: bool, companies: List[str]) -> dict:
+def build_props_for_combined(row: ProblemAgg, companies_list: List[str]) -> dict:
+    """Build Notion properties for combined database."""
     props = {
         PROP_TITLE: {"title": title_rich_text(row.frontend_id, row.title, row.url)},
-        PROP_FREQ30_AVG: {"number": float(row.avg30)},
-        PROP_FREQ90_AVG: {"number": float(row.avg90)},
-        PROP_FREQ180_AVG: {"number": float(row.avg180)},
-        PROP_OVERALL_SCORE: {"number": float(row.score)},
-        PROP_COMPANY_COUNT: {"number": len(companies)},
-        PROP_LAST_COMBINED: {"date": {"start": datetime.date.today().isoformat()}},
+        PROP_FREQ30_AVG: {"number": round(row.avg30, 2)},
+        PROP_FREQ90_AVG: {"number": round(row.avg90, 2)},
+        PROP_FREQ180_AVG: {"number": round(row.avg180, 2)},
+        PROP_RELEVANCE_SCORE: {"number": round(row.score, 2)},
+        PROP_LAST_COMPUTED: {"date": {"start": datetime.date.today().isoformat()}},
     }
-    if row.slug:
-        props[PROP_SLUG] = {"rich_text": [{"type": "text", "text": {"content": row.slug}}]}
     if row.difficulty:
         props[PROP_DIFFICULTY] = {"select": {"name": row.difficulty}}
     if row.tags:
         props[PROP_TOPIC_TAGS] = {"multi_select": [{"name": t} for t in sorted(row.tags)]}
     if row.acceptance is not None:
-        props[PROP_ACCEPT_RATE] = {"number": float(row.acceptance)}
-    if include_companies and companies:
-        props[PROP_COMPANIES] = {"multi_select": [{"name": c} for c in companies]}
+        props[PROP_ACCEPT_RATE] = {"number": round(row.acceptance, 2)}
+    if companies_list:
+        props[PROP_COMPANIES] = {"multi_select": [{"name": c} for c in sorted(companies_list)]}
     return props
 
 def upsert_combined_page(
     notion: Client,
     database_id: str,
     row: ProblemAgg,
-    include_companies: bool,
     companies: List[str],
+    existing_titles: Dict[str, str],
     dry_run: bool = False,
-):
-    # Ensure select options exist
+) -> str:
+    """
+    Upsert a single problem to the combined database.
+
+    Args:
+        existing_titles: Dict mapping title_text -> page_id (pre-fetched)
+
+    Returns: "created" or "updated"
+    """
+    title_text = f"{row.frontend_id}. {row.title}" if row.frontend_id else row.title
+
+    if dry_run:
+        # Skip all Notion API calls in dry-run mode
+        companies_str = ", ".join(sorted(row.companies))
+        log(f"[DRY-RUN] CREATE/UPDATE {title_text}")
+        log(f"  Companies: {companies_str}")
+        log(f"  Freq: 30d={row.avg30:.2f}, 90d={row.avg90:.2f}, 180d={row.avg180:.2f}")
+        log(f"  Relevance Score: {row.score:.2f}")
+        log("")
+        return "created"
+
+    # Ensure select/multi-select options exist
     if row.difficulty:
         ensure_select_option(notion, database_id, PROP_DIFFICULTY, row.difficulty)
     if row.tags:
         for t in row.tags:
             ensure_select_option(notion, database_id, PROP_TOPIC_TAGS, t)
-    if include_companies:
+    if companies:
         for c in companies:
             ensure_select_option(notion, database_id, PROP_COMPANIES, c)
 
-    props = build_props_for_combined(row, include_companies, companies)
+    props = build_props_for_combined(row, sorted(row.companies))
 
-    # Try find by slug first, then by title
-    page_id = find_page_by_slug(notion, database_id, row.slug)
-    if not page_id:
-        title_text = f"{row.frontend_id}. {row.title}" if row.frontend_id else row.title
-        page_id = find_page_by_title(notion, database_id, title_text)
-
-    if dry_run:
-        action = "UPDATE" if page_id else "CREATE"
-        log(f"[DRY-RUN] {action} "
-            f"{row.slug or row.title} | avg30={row.avg30:.2f}, avg90={row.avg90:.2f}, avg180={row.avg180:.2f}, "
-            f"score={row.score:.2f}")
-        return
+    # Check if exists using pre-fetched titles
+    page_id = existing_titles.get(title_text)
 
     if page_id:
         notion.pages.update(page_id=page_id, properties=props)
+        return "updated"
     else:
         notion.pages.create(parent={"database_id": database_id}, properties=props)
+        return "created"
 
 # ---------------------------
 # Core combining logic
@@ -426,19 +457,19 @@ def combine_from_snapshots(
 
 def main():
     load_dotenv()
-    ap = argparse.ArgumentParser(description="Combine selected companies into a single Top-N Notion DB based on averaged frequencies.")
+    ap = argparse.ArgumentParser(description="Combine selected companies into a Top-N Notion DB with weighted relevance scoring.")
     ap.add_argument("--dbmap", default=os.getenv("NOTION_DB_MAP_FILE", "./dbmap.json"), help="Path to dbmap.json (display -> {db, slug})")
     ap.add_argument("--companies", required=True, help='Comma-separated display names matching dbmap.json keys, e.g. "Meta, Google"')
     ap.add_argument("--root", default=os.getenv("COMPANIES_ROOT", "companies"))
     ap.add_argument("--date", help="YYYY-MM-DD (default: latest per company)")
-    ap.add_argument("--combined-db", default=os.getenv("COMBINED_DATABASE_ID"), help="Combined Notion database ID (or set COMBINED_DATABASE_ID)")
-    ap.add_argument("--score", choices=["simple","weighted"], default="simple", help="Scoring method for ranking top N")
-    ap.add_argument("--top", type=int, default=100, help="Top N rows to upsert (default 100)")
+    ap.add_argument("--combined-db", default=os.getenv("NOTION_COMBINED_DATABASE_ID"), help="Combined Notion database ID (or set NOTION_COMBINED_DATABASE_ID)")
+    ap.add_argument("--score", choices=["simple","weighted"], default="weighted", help="Scoring method: weighted (0.5*30d + 0.3*90d + 0.2*180d, default) or simple (mean)")
+    ap.add_argument("--top", type=int, default=150, help="Top N rows to upsert (default 150)")
     ap.add_argument("--dry-run", action="store_true", help="Preview without writing to Notion")
     args = ap.parse_args()
 
     if not args.combined_db:
-        raise SystemExit("Missing --combined-db or COMBINED_DATABASE_ID.")
+        raise SystemExit("Missing --combined-db or NOTION_COMBINED_DATABASE_ID in .env")
 
     dbmap = parse_dbmap(Path(args.dbmap))
     # Resolve selected companies (must exist as keys in dbmap)
@@ -446,8 +477,13 @@ def main():
     missing = [c for c in selected if c not in dbmap]
     if missing:
         known = ", ".join(sorted(dbmap.keys()))
-        raise SystemExit(f"Companies not in dbmap: {missing}
-Known: {known}")
+        raise SystemExit(f"Companies not in dbmap: {missing}\nKnown: {known}")
+
+    log(f"=== Combining Companies ===")
+    log(f"Companies: {', '.join(selected)}")
+    log(f"Scoring: {args.score}")
+    log(f"Top N: {args.top}")
+    log("")
 
     rows, N, used_dirs = combine_from_snapshots(
         companies=selected,
@@ -461,24 +497,63 @@ Known: {known}")
     if used_dirs:
         for c, p in used_dirs.items():
             log(f"  {c}: {p}")
+    log("")
 
     topN = rows[: args.top]
+    log(f"Upserting top {len(topN)} questions to combined database...")
 
     notion = notion_client_from_env()
-    include_companies = db_has_property(notion, args.combined_db, PROP_COMPANIES)
+
+    # Fetch all existing pages once (for update detection)
+    existing_titles = {}
+    if not args.dry_run:
+        log("Fetching existing records...")
+        start_cursor = None
+        while True:
+            query_params = {"database_id": args.combined_db, "page_size": 100}
+            if start_cursor:
+                query_params["start_cursor"] = start_cursor
+
+            resp = notion.databases.query(**query_params)
+            for page in resp.get("results", []):
+                props = page.get("properties", {})
+                title_prop = props.get(PROP_TITLE, {})
+                if title_prop.get("type") == "title":
+                    title_parts = title_prop.get("title", [])
+                    if title_parts:
+                        title_text = "".join([t.get("text", {}).get("content", "") for t in title_parts])
+                        existing_titles[title_text] = page["id"]
+
+            if not resp.get("has_more"):
+                break
+            start_cursor = resp.get("next_cursor")
+
+        log(f"Found {len(existing_titles)} existing records")
+        log("")
+
+    # Track stats
+    created = 0
+    updated = 0
 
     # Upsert
     for i, row in enumerate(topN, 1):
-        upsert_combined_page(
+        result = upsert_combined_page(
             notion,
             args.combined_db,
             row,
-            include_companies=include_companies,
             companies=selected,
+            existing_titles=existing_titles,
             dry_run=args.dry_run,
         )
+        if result == "created":
+            created += 1
+        elif result == "updated":
+            updated += 1
 
-    log(f"Done. {'(dry-run)' if args.dry_run else ''}")
+    log("")
+    log(f"=== Summary ===")
+    log(f"Created: {created}, Updated: {updated}")
+    log(f"{'(dry-run)' if args.dry_run else 'Done!'}")
 
 if __name__ == "__main__":
     main()

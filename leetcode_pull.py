@@ -171,51 +171,72 @@ def pull_snapshot_for_company(page: Page, display_name: str, leetcode_slug: str,
         out_dir: Output directory
         top_n: Number of top questions to keep (sorted by frequency descending)
         throttle_ms: Delay between requests in milliseconds
+
+    Raises:
+        RuntimeError: If any window file fails to pull after retries
     """
     out_dir.mkdir(parents=True, exist_ok=True)
+    failed_windows = []
+
     for short, long_slug in WINDOWS.items():
         favorite = f"{leetcode_slug}-{long_slug}"
-        try:
-            # Fetch with high limit to get all questions
-            data = graphql_fetch(page, leetcode_slug, long_slug, limit=1000)
+        max_retries = 3
+        success = False
 
-            # CRITICAL FIX: LeetCode API sometimes returns unsorted data
-            # Sort by frequency descending to ensure we get top N questions
+        for attempt in range(max_retries):
             try:
-                questions = data["data"]["favoriteQuestionList"]["questions"]
-                total_length = data["data"]["favoriteQuestionList"]["totalLength"]
+                # Fetch with high limit to get all questions
+                data = graphql_fetch(page, leetcode_slug, long_slug, limit=1000)
 
-                # Sort by frequency descending
-                questions_sorted = sorted(questions, key=lambda q: q.get("frequency", 0), reverse=True)
+                # CRITICAL FIX: LeetCode API sometimes returns unsorted data
+                # Sort by frequency descending to ensure we get top N questions
+                try:
+                    questions = data["data"]["favoriteQuestionList"]["questions"]
+                    total_length = data["data"]["favoriteQuestionList"]["totalLength"]
 
-                # Take top N questions
-                questions_top = questions_sorted[:top_n]
+                    # Sort by frequency descending
+                    questions_sorted = sorted(questions, key=lambda q: q.get("frequency", 0), reverse=True)
 
-                # Update the data structure
-                data["data"]["favoriteQuestionList"]["questions"] = questions_top
-                data["data"]["favoriteQuestionList"]["totalLength"] = total_length  # Keep original total
-                data["data"]["favoriteQuestionList"]["hasMore"] = len(questions_sorted) > top_n
+                    # Take top N questions
+                    questions_top = questions_sorted[:top_n]
 
-                print(f"[{display_name}] {short}: Fetched {len(questions)}/{total_length}, sorted and kept top {len(questions_top)} by frequency")
+                    # Update the data structure
+                    data["data"]["favoriteQuestionList"]["questions"] = questions_top
+                    data["data"]["favoriteQuestionList"]["totalLength"] = total_length  # Keep original total
+                    data["data"]["favoriteQuestionList"]["hasMore"] = len(questions_sorted) > top_n
 
-                # Show top 3 for verification
-                if questions_top:
-                    top3 = questions_top[:3]
-                    print(f"  Top 3: ", end="")
-                    for q in top3:
-                        qid = q.get('questionFrontendId', '?')
-                        freq = q.get('frequency', 0)
-                        print(f"{qid}(f={freq:.1f}) ", end="")
-                    print()
-            except (KeyError, TypeError) as e:
-                print(f"[WARN] Could not sort {display_name} {short}: {e}", file=sys.stderr)
+                    print(f"[{display_name}] {short}: Fetched {len(questions)}/{total_length}, sorted and kept top {len(questions_top)} by frequency")
 
-            out_path = out_dir / f"{short}.json"
-            out_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-            print(f"[OK] {display_name} {short} -> {out_path}")
-            time.sleep(throttle_ms / 1000.0)
-        except Exception as e:
-            print(f"[WARN] Pull failed for {display_name} ({favorite}): {e}", file=sys.stderr)
+                    # Show top 3 for verification
+                    if questions_top:
+                        top3 = questions_top[:3]
+                        print(f"  Top 3: ", end="")
+                        for q in top3:
+                            qid = q.get('questionFrontendId', '?')
+                            freq = q.get('frequency', 0)
+                            print(f"{qid}(f={freq:.1f}) ", end="")
+                        print()
+                except (KeyError, TypeError) as e:
+                    print(f"[WARN] Could not sort {display_name} {short}: {e}", file=sys.stderr)
+
+                out_path = out_dir / f"{short}.json"
+                out_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+                print(f"[OK] {display_name} {short} -> {out_path}")
+                success = True
+                time.sleep(throttle_ms / 1000.0)
+                break  # Success, exit retry loop
+            except Exception as e:
+                retry_msg = f" (attempt {attempt + 1}/{max_retries})" if attempt < max_retries - 1 else ""
+                print(f"[WARN] Pull failed for {display_name} ({favorite}): {e}{retry_msg}", file=sys.stderr)
+                if attempt < max_retries - 1:
+                    time.sleep(2 ** attempt)  # Exponential backoff: 1s, 2s
+
+        if not success:
+            failed_windows.append(short)
+
+    # Fail loudly if any windows are missing
+    if failed_windows:
+        raise RuntimeError(f"{display_name}: Failed to pull windows {failed_windows} after {max_retries} retries. All 3 windows (30d, 90d, 180d) are required.")
 
 def main():
     load_dotenv()

@@ -289,32 +289,50 @@ class NotionAdapter(UploadAdapter):
         self._ensure_options_exist(database_id, self.PROP_COMPANY, companies)
 
         # Execute operations in batches with concurrency
-        batch_size = 10
-        max_workers = 5
+        batch_size = 20  # Increased from 10 for more parallelism
+        max_workers = 10  # Increased from 5 to utilize burst allowance
 
-        def _execute_single(op):
-            """Execute a single operation."""
-            try:
-                action = op["action"]
-                props = op["properties"]
+        def _execute_single(op, retries=3):
+            """Execute a single operation with retry logic."""
+            last_error = None
 
-                if action == "create":
-                    self.client.pages.create(
-                        parent={"database_id": database_id},
-                        properties=props
-                    )
-                    return "created"
-                elif action == "update":
-                    self.client.pages.update(
-                        page_id=op["page_id"],
-                        properties=props
-                    )
-                    if op.get("zeroed"):
-                        return "zeroed"
-                    return "updated"
-            except Exception as e:
-                print(f"[ERROR] {op.get('slug', 'unknown')}: {e}", file=sys.stderr)
-                return "error"
+            for attempt in range(retries):
+                try:
+                    action = op["action"]
+                    props = op["properties"]
+
+                    if action == "create":
+                        self.client.pages.create(
+                            parent={"database_id": database_id},
+                            properties=props
+                        )
+                        return "created"
+                    elif action == "update":
+                        self.client.pages.update(
+                            page_id=op["page_id"],
+                            properties=props
+                        )
+                        if op.get("zeroed"):
+                            return "zeroed"
+                        return "updated"
+                except Exception as e:
+                    last_error = e
+                    error_str = str(e)
+
+                    # Check for rate limit error (429)
+                    if "rate_limited" in error_str or "429" in error_str:
+                        # Exponential backoff: 1s, 2s, 4s
+                        backoff = 2 ** attempt
+                        time.sleep(backoff)
+                        continue
+                    else:
+                        # Non-rate-limit error, don't retry
+                        print(f"[ERROR] {op.get('slug', 'unknown')}: {e}", file=sys.stderr)
+                        return "error"
+
+            # All retries exhausted
+            print(f"[ERROR] {op.get('slug', 'unknown')}: {last_error} (after {retries} retries)", file=sys.stderr)
+            return "error"
 
         # Process in batches to respect rate limits
         for i in range(0, len(operations), batch_size):
@@ -334,9 +352,9 @@ class NotionAdapter(UploadAdapter):
                     elif result == "error":
                         stats.errors += 1
 
-            # Rate limit: pause between batches
+            # Rate limit: minimal pause between batches (trust burst allowance + retry logic)
             if i + batch_size < len(operations):
-                time.sleep(0.3)  # ~3 req/sec average
+                time.sleep(0.1)  # Reduced from 0.3s to maximize throughput
 
         return stats
 

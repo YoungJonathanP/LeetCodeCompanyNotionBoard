@@ -108,6 +108,9 @@ If you plan to use `combine_companies.py` to aggregate questions across multiple
 - **Notes** (Text/Rich Text)
 - Any other custom properties you add
 
+**Note on Question Retention:**
+When a question falls off the top N list, its frequencies and relevance score are zeroed (not deleted). This preserves your notes and custom data while pushing it down the list, and the question will automatically reappear if it returns to the top N.
+
 **C. Get Database ID**
 
 From your Notion database URL:
@@ -237,7 +240,7 @@ python generate_master.py --company Meta --date 2025-10-03
 python upload.py --companies Meta --date 2025-10-03
 ```
 
-**Combine multiple companies into a unified board:**
+**Combine multiple companies into a unified board from locally generated Master files:**
 ```bash
 # Aggregates top questions across multiple companies (requires NOTION_COMBINED_DATABASE_ID)
 python combine_companies.py --companies "Meta,Google,Amazon"

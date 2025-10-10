@@ -4,6 +4,7 @@ import sys
 import json
 import argparse
 import datetime
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple, Set
@@ -30,6 +31,9 @@ PROP_LAST_COMPUTED   = "Last Computed"        # Date (when row was last updated)
 URL_PREFIX = "https://leetcode.com/problems/"
 
 COMPANIES_ROOT = os.getenv("COMPANIES_ROOT", "companies")
+
+# Numeric comparison tolerance
+EPS = 1e-6
 
 # ---------------------------
 # Data models
@@ -239,7 +243,44 @@ def notion_client_from_env() -> Client:
         raise RuntimeError("Missing NOTION_TOKEN (set in .env)")
     return Client(auth=token)
 
+def _existing_option_names(schema: dict, prop_name: str) -> set:
+    """Extract existing option names from database schema for a select/multi_select property."""
+    prop = (schema.get("properties") or {}).get(prop_name)
+    if not prop:
+        return set()
+    ptype = prop.get("type")
+    if ptype not in ("select", "multi_select"):
+        return set()
+    return {o.get("name") for o in prop[ptype].get("options", []) if o.get("name")}
+
+def batch_add_options(notion: Client, database_id: str, prop_name: str, missing: List[str], schema: dict):
+    """
+    Add multiple missing options to a select/multi_select property in a SINGLE API call.
+    This is vastly more efficient than calling ensure_select_option per value.
+    """
+    if not missing:
+        return
+    prop = schema["properties"].get(prop_name)
+    if not prop:
+        return
+    ptype = prop["type"]  # "select" or "multi_select"
+    current = prop[ptype].get("options", [])
+    new_options = current + [{"name": v} for v in missing]
+    try:
+        notion.databases.update(
+            database_id=database_id,
+            properties={prop_name: {ptype: {"options": new_options}}}
+        )
+        # Update local schema cache
+        prop[ptype]["options"] = new_options
+    except Exception as e:
+        warn(f"Failed to batch-add options to {prop_name}: {e}")
+
 def ensure_select_option(notion: Client, database_id: str, prop_name: str, value: str):
+    """
+    DEPRECATED: Use batch_add_options() instead for performance.
+    This function makes 1 API call per value which is extremely slow.
+    """
     try:
         db = notion.databases.retrieve(database_id=database_id)
         prop = db.get("properties", {}).get(prop_name)
@@ -287,6 +328,35 @@ def find_page_by_title(notion: Client, database_id: str, title_text: str) -> Opt
         warn(f"Query by title failed: {e}")
         return None
 
+def needs_numeric_update(existing_meta: dict, new_props: dict) -> bool:
+    """
+    Compare existing numeric values with new ones.
+    Returns True iff any numeric field changed (with EPS tolerance).
+
+    existing_meta: {'freq30', 'freq90', 'freq180', 'score'}
+    new_props: Notion properties payload
+    """
+    def new_num(key: str) -> Optional[float]:
+        p = new_props.get(key, {})
+        return p.get("number")
+
+    checks = [
+        (existing_meta.get("freq30"), new_num(PROP_FREQ30_AVG)),
+        (existing_meta.get("freq90"), new_num(PROP_FREQ90_AVG)),
+        (existing_meta.get("freq180"), new_num(PROP_FREQ180_AVG)),
+        (existing_meta.get("score"), new_num(PROP_RELEVANCE_SCORE)),
+    ]
+
+    for old, new in checks:
+        if new is None:
+            continue
+        if old is None and new is not None:
+            return True
+        if old is not None and new is not None and abs((old or 0.0) - (new or 0.0)) > EPS:
+            return True
+
+    return False
+
 def build_props_for_combined(row: ProblemAgg, companies_list: List[str]) -> dict:
     """
     Build Notion properties for combined database.
@@ -318,16 +388,19 @@ def upsert_combined_page(
     database_id: str,
     row: ProblemAgg,
     companies: List[str],
-    existing_titles: Dict[str, str],
+    existing_pages: Dict[str, dict],
     dry_run: bool = False,
 ) -> str:
     """
-    Upsert a single problem to the combined database.
+    Upsert a single problem to the combined database with delta detection.
 
     Args:
-        existing_titles: Dict mapping title_text -> page_id (pre-fetched)
+        existing_pages: Dict mapping title_text -> {id, freq30, freq90, freq180, score}
 
-    Returns: "created" or "updated"
+    Returns: "created", "updated", or "skipped"
+
+    NOTE: All select/multi-select options must be ensured BEFORE calling this function
+    (via batch_add_options in main). This function no longer ensures options per-row for performance.
     """
     title_text = f"{row.frontend_id}. {row.title}" if row.frontend_id else row.title
 
@@ -341,25 +414,21 @@ def upsert_combined_page(
         log("")
         return "created"
 
-    # Ensure select/multi-select options exist
-    if row.difficulty:
-        ensure_select_option(notion, database_id, PROP_DIFFICULTY, row.difficulty)
-    if row.tags:
-        for t in row.tags:
-            ensure_select_option(notion, database_id, PROP_TOPIC_TAGS, t)
-    if companies:
-        for c in companies:
-            ensure_select_option(notion, database_id, PROP_COMPANIES, c)
-
     props = build_props_for_combined(row, sorted(row.companies))
 
-    # Check if exists using pre-fetched titles
-    page_id = existing_titles.get(title_text)
+    # Check if exists using pre-fetched pages
+    page_meta = existing_pages.get(title_text)
 
-    if page_id:
-        notion.pages.update(page_id=page_id, properties=props)
-        return "updated"
+    if page_meta:
+        # Page exists - check if numeric values changed
+        if needs_numeric_update(page_meta, props):
+            notion.pages.update(page_id=page_meta["id"], properties=props)
+            return "updated"
+        else:
+            # No changes needed
+            return "skipped"
     else:
+        # Create new page
         notion.pages.create(parent={"database_id": database_id}, properties=props)
         return "created"
 
@@ -463,6 +532,8 @@ def combine_from_snapshots(
 
 def main():
     load_dotenv()
+    start_time = time.perf_counter()
+
     ap = argparse.ArgumentParser(description="Combine selected companies into a Top-N Notion DB with weighted relevance scoring.")
     ap.add_argument("--dbmap", default=os.getenv("NOTION_DB_MAP_FILE", "./dbmap.json"), help="Path to dbmap.json (display -> {db, slug})")
     ap.add_argument("--companies", required=True, help='Comma-separated display names matching dbmap.json keys, e.g. "Meta, Google"')
@@ -491,6 +562,7 @@ def main():
     log(f"Top N: {args.top}")
     log("")
 
+    t_start_combine = time.perf_counter()
     rows, N, used_dirs = combine_from_snapshots(
         companies=selected,
         dbmap=dbmap,
@@ -498,8 +570,9 @@ def main():
         date=args.date,
         score_mode=args.score,
     )
+    t_combine = time.perf_counter() - t_start_combine
 
-    log(f"Combined {len(rows)} unique problems across {N} companies.")
+    log(f"Combined {len(rows)} unique problems across {N} companies ({t_combine:.2f}s)")
     if used_dirs:
         for c, p in used_dirs.items():
             log(f"  {c}: {p}")
@@ -507,11 +580,41 @@ def main():
 
     topN = rows[: args.top]
     log(f"Upserting top {len(topN)} questions to combined database...")
+    log("")
 
     notion = notion_client_from_env()
 
-    # Fetch all existing pages once (for update detection)
-    existing_titles = {}
+    # Batch-ensure all select/multi-select options BEFORE upserting (massive performance improvement)
+    if not args.dry_run:
+        t_start_schema = time.perf_counter()
+        log("Retrieving database schema and ensuring options...")
+        schema = notion.databases.retrieve(database_id=args.combined_db)
+
+        # Collect all unique values needed
+        need_diffs = {r.difficulty for r in topN if r.difficulty}
+        need_tags = set()
+        for r in topN:
+            need_tags.update(r.tags)
+        need_companies = set(selected)
+
+        # Compute missing options
+        missing_diffs = list(need_diffs - _existing_option_names(schema, PROP_DIFFICULTY))
+        missing_tags = list(need_tags - _existing_option_names(schema, PROP_TOPIC_TAGS))
+        missing_companies = list(need_companies - _existing_option_names(schema, PROP_COMPANIES))
+
+        # Batch-add (at most 3 API calls total, regardless of how many options)
+        batch_add_options(notion, args.combined_db, PROP_DIFFICULTY, missing_diffs, schema)
+        batch_add_options(notion, args.combined_db, PROP_TOPIC_TAGS, missing_tags, schema)
+        batch_add_options(notion, args.combined_db, PROP_COMPANIES, missing_companies, schema)
+
+        t_schema = time.perf_counter() - t_start_schema
+        log(f"Schema updated ({t_schema:.2f}s)")
+        log(f"  Added: {len(missing_diffs)} difficulties, {len(missing_tags)} tags, {len(missing_companies)} companies")
+        log("")
+
+    # Fetch all existing pages once (for update detection with numeric values)
+    t_start_fetch = time.perf_counter()
+    existing_pages = {}  # title -> {id, freq30, freq90, freq180, score}
     if not args.dry_run:
         log("Fetching existing records...")
         start_cursor = None
@@ -528,37 +631,99 @@ def main():
                     title_parts = title_prop.get("title", [])
                     if title_parts:
                         title_text = "".join([t.get("text", {}).get("content", "") for t in title_parts])
-                        existing_titles[title_text] = page["id"]
+
+                        # Extract numeric values for delta detection
+                        def num(prop_name):
+                            p = props.get(prop_name, {})
+                            return p.get("number")
+
+                        existing_pages[title_text] = {
+                            "id": page["id"],
+                            "freq30": num(PROP_FREQ30_AVG),
+                            "freq90": num(PROP_FREQ90_AVG),
+                            "freq180": num(PROP_FREQ180_AVG),
+                            "score": num(PROP_RELEVANCE_SCORE),
+                        }
 
             if not resp.get("has_more"):
                 break
             start_cursor = resp.get("next_cursor")
 
-        log(f"Found {len(existing_titles)} existing records")
+        t_fetch = time.perf_counter() - t_start_fetch
+        log(f"Found {len(existing_pages)} existing records ({t_fetch:.2f}s)")
         log("")
 
     # Track stats
     created = 0
     updated = 0
+    skipped = 0
+    zeroed = 0
 
-    # Upsert
+    # Upsert top N
+    t_start_upsert = time.perf_counter()
+    topN_titles = set()  # Track which titles we're keeping in top N
     for i, row in enumerate(topN, 1):
+        title_text = f"{row.frontend_id}. {row.title}" if row.frontend_id else row.title
+        topN_titles.add(title_text)
+
         result = upsert_combined_page(
             notion,
             args.combined_db,
             row,
             companies=selected,
-            existing_titles=existing_titles,
+            existing_pages=existing_pages,
             dry_run=args.dry_run,
         )
         if result == "created":
             created += 1
         elif result == "updated":
             updated += 1
+        elif result == "skipped":
+            skipped += 1
+    t_upsert = time.perf_counter() - t_start_upsert
+
+    # Zero out questions that fell off the top N (preserves user data, notes, etc.)
+    t_start_zero = time.perf_counter()
+    if not args.dry_run and existing_pages:
+        log("")
+        log("Zeroing questions that fell off the top N list...")
+        for title_text, page_meta in existing_pages.items():
+            if title_text not in topN_titles:
+                # This page exists but is not in top N anymore - zero its values
+                # Only zero if currently non-zero (optimization)
+                if (page_meta.get("freq30") or 0) > EPS or \
+                   (page_meta.get("freq90") or 0) > EPS or \
+                   (page_meta.get("freq180") or 0) > EPS or \
+                   (page_meta.get("score") or 0) > EPS:
+                    zero_props = {
+                        PROP_FREQ30_AVG: {"number": 0.0},
+                        PROP_FREQ90_AVG: {"number": 0.0},
+                        PROP_FREQ180_AVG: {"number": 0.0},
+                        PROP_RELEVANCE_SCORE: {"number": 0.0},
+                    }
+                    try:
+                        notion.pages.update(page_id=page_meta["id"], properties=zero_props)
+                        zeroed += 1
+                    except Exception as e:
+                        warn(f"Failed to zero page '{title_text}': {e}")
+
+        t_zero = time.perf_counter() - t_start_zero
+        if zeroed > 0:
+            log(f"Zeroed {zeroed} questions ({t_zero:.2f}s)")
+    elif args.dry_run:
+        # Calculate how many would be zeroed in dry-run
+        for title_text in existing_pages.keys():
+            if title_text not in topN_titles:
+                zeroed += 1
+        if zeroed > 0:
+            log(f"[DRY-RUN] Would zero {zeroed} questions that fell off top {args.top}")
+
+    total_time = time.perf_counter() - start_time
 
     log("")
     log(f"=== Summary ===")
-    log(f"Created: {created}, Updated: {updated}")
+    log(f"Created: {created}, Updated: {updated}, Skipped: {skipped}, Zeroed: {zeroed}")
+    log(f"Time: combine={t_combine:.2f}s, upsert={t_upsert:.2f}s, total={total_time:.2f}s")
     log(f"{'(dry-run)' if args.dry_run else 'Done!'}")
 
 if __name__ == "__main__":

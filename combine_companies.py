@@ -288,7 +288,13 @@ def find_page_by_title(notion: Client, database_id: str, title_text: str) -> Opt
         return None
 
 def build_props_for_combined(row: ProblemAgg, companies_list: List[str]) -> dict:
-    """Build Notion properties for combined database."""
+    """
+    Build Notion properties for combined database.
+
+    IMPORTANT: Only includes properties managed by this script. User-managed properties
+    (e.g., Last Attempted, Notes, custom fields) are intentionally excluded and will be
+    preserved during updates since Notion's API only modifies explicitly provided properties.
+    """
     props = {
         PROP_TITLE: {"title": title_rich_text(row.frontend_id, row.title, row.url)},
         PROP_FREQ30_AVG: {"number": round(row.avg30, 2)},

@@ -87,6 +87,27 @@ Create a database with these properties:
 - **Company** (Select) - Company name
 - **Last Attempted** (Date) - Track your progress
 
+### Combined Database Schema
+
+If you plan to use `combine_companies.py` to aggregate questions across multiple companies, create a **separate database** with these additional/modified properties:
+
+**Required Properties:**
+- **Name** (Title) - Question title with number (hyperlinked)
+- **Difficulty** (Select) - Mode across contributing companies
+- **Topic Tags** (Multi-select) - Union of all tags
+- **Freq 30d Avg** (Number) - Average 30-day frequency
+- **Freq 90d Avg** (Number) - Average 90-day frequency
+- **Freq 180d Avg** (Number) - Average 180-day frequency
+- **Acceptance Rate** (Number) - Mean acceptance percentage
+- **Companies** (Multi-select) - Which companies contributed this question
+- **Relevance Score** (Number) - Weighted score (0.5×30d + 0.3×90d + 0.2×180d)
+- **Last Computed** (Date) - When aggregation last ran
+
+**Optional User Columns (preserved during updates):**
+- **Last Attempted** (Date)
+- **Notes** (Text/Rich Text)
+- Any other custom properties you add
+
 **C. Get Database ID**
 
 From your Notion database URL:
@@ -216,10 +237,17 @@ python generate_master.py --company Meta --date 2025-10-03
 python upload.py --companies Meta --date 2025-10-03
 ```
 
-**Performance testing:**
+**Combine multiple companies into a unified board:**
 ```bash
-python baseline_test.py companies/Meta/2025-10-03
+# Aggregates top questions across multiple companies (requires NOTION_COMBINED_DATABASE_ID)
+python combine_companies.py --companies "Meta,Google,Amazon"
+
+# Optional arguments:
+# --score weighted    # Weighted scoring: 0.5*30d + 0.3*90d + 0.2*180d (default)
+# --score simple      # Simple averaging across all windows
+# --top 100           # Limit to top N questions (default: 150)
 ```
+*Note: The combined database requires [additional properties](#combined-database-schema) beyond the per-company database schema.*
 
 ---
 
@@ -240,9 +268,10 @@ LeetCodeCompanyNotionBoard/
 ├── generate_master.py            # Step 2: Generate master file
 ├── upload.py                     # Step 3: Upload to Notion
 ├── pull_and_import.py            # Complete workflow (1+2+3)
+├── notion_company_snapshot_import.py # Incremental per-company imports
+├── combine_companies.py          # Aggregate multiple companies
 │
 ├── upload_adapter.py             # Upload abstraction layer
-├── baseline_test.py              # Performance testing
 │
 ├── .env                          # Credentials (gitignored)
 ├── dbmap.json                    # Company mappings (gitignored)
@@ -261,7 +290,8 @@ LeetCodeCompanyNotionBoard/
 NOTION_TOKEN=secret_xxx              # Notion integration token
 
 # Optional
-NOTION_DATABASE_ID=xxx               # Fallback database ID
+NOTION_DATABASE_ID=xxx               # Fallback database ID for per-company imports (Used in lieu of dbmap.json)
+NOTION_COMBINED_DATABASE_ID=xxx      # Database ID for combined multi-company board
 NOTION_DB_MAP_FILE=./dbmap.json     # Company mapping file
 COMPANIES_ROOT=companies             # Data storage directory
 PULL_TOP_N=100                       # Default top N questions
@@ -310,8 +340,12 @@ PULL_THROTTLE_MS=400                 # Delay between requests
 │  • If changed: computes per-question operations             │
 │  • Batch upload (5 workers, 10 ops/batch)                   │
 │  • Saves new upload state                                   │
+│  • Preserves user columns (Last Attempted, Notes, etc.)     │
 └─────────────────────────────────────────────────────────────┘
 ```
+
+**🔒 User Data Preservation:**
+Updates only modify script-managed properties (frequencies, difficulty, tags, etc.). Your personal data like **Last Attempted**, **Notes**, and any custom fields remain untouched.
 
 ### Data Flow
 

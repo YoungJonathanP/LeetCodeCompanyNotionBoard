@@ -247,7 +247,13 @@ def get_pages_index(notion: Client, database_id: str, company: Optional[str] = N
     return pages
 
 def page_props(row: ProblemRow, company: Optional[str]) -> dict:
-    """Build full properties payload. We'll only send it when needed."""
+    """
+    Build properties payload for update/create operations.
+
+    IMPORTANT: Only includes properties managed by this script. User-managed properties
+    (e.g., Last Attempted, Notes, custom fields) are intentionally excluded and will be
+    preserved during updates since Notion's API only modifies explicitly provided properties.
+    """
     props = {
         PROP_TITLE: {"title": build_title_rich_text(row)},
         PROP_FREQ_30: {"number": float(row.freq_30)},

@@ -57,6 +57,9 @@ debug_*.html
 data/
 snapshots/
 
+# Topic analysis output
+topic_analysis_output/
+
 # -----------------------------
 # Testing & deprecated files
 # -----------------------------

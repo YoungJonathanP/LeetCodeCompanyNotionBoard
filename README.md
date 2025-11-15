@@ -51,9 +51,12 @@ cd LeetCodeCompanyNotionBoard
 python3 -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 
-# Install dependencies
+# Install core dependencies
 pip install python-dotenv playwright notion-client
 playwright install chromium
+
+# Install topic analysis dependencies (optional)
+pip install plotly scipy matplotlib pandas
 ```
 
 ### 2. Configure Notion Integration
@@ -252,6 +255,28 @@ python combine_companies.py --companies "Meta,Google,Amazon"
 ```
 *Note: The combined database requires [additional properties](#combined-database-schema) beyond the per-company database schema.*
 
+**Analyze topic distributions and generate visualizations:**
+```bash
+# Analyze single company
+python topic_analysis.py --company Meta --window 180d
+
+# Analyze multiple companies with comparisons
+python topic_analysis.py --companies "Meta,Google,Amazon" --window 180d --compare
+
+# Auto-open visualizations in browser
+python topic_analysis.py --company Meta --window 180d --auto-open
+
+# Custom output directory
+python topic_analysis.py --companies "Meta,Amazon" --output custom_output/ --compare
+
+# Available options:
+# --window {30d,90d,180d}  # Time window to analyze (default: 180d)
+# --compare                # Include statistical comparisons between companies
+# --auto-open              # Automatically open HTML visualizations in browser
+# --output <dir>           # Custom output directory (default: topic_analysis_output/)
+```
+*Note: Requires additional dependencies: `pip install plotly scipy matplotlib pandas`*
+
 ---
 
 ## 📂 Project Structure
@@ -267,12 +292,18 @@ LeetCodeCompanyNotionBoard/
 │           ├── master.json       # Consolidated data
 │           └── .upload_state.json # Delta sync state
 │
+├── topic_analysis_output/         # Topic analysis visualizations (gitignored)
+│   ├── Meta_180d_topic_analysis.html
+│   ├── Combined_180d_topic_analysis.html
+│   └── statistical_comparison.txt
+│
 ├── leetcode_pull.py              # Step 1: Pull from LeetCode
 ├── generate_master.py            # Step 2: Generate master file
 ├── upload.py                     # Step 3: Upload to Notion
 ├── pull_and_import.py            # Complete workflow (1+2+3)
 ├── notion_company_snapshot_import.py # Incremental per-company imports
 ├── combine_companies.py          # Aggregate multiple companies
+├── topic_analysis.py             # Analyze topic distributions
 │
 ├── upload_adapter.py             # Upload abstraction layer
 │
@@ -362,6 +393,9 @@ master.json (single source of truth)
 Upload operations (only changes)
     ↓ [batch + concurrent]
 Notion Database
+
+    ↓ [topic analysis - read only]
+Interactive HTML visualizations + statistical reports
 ```
 
 ### Delta Sync Logic
@@ -454,6 +488,24 @@ Total:               ~5 minutes (first time)
 - **Solution:** Increase `--throttle-ms` (default: 400)
   ```bash
   python leetcode_pull.py --companies Meta --throttle-ms 1000
+  ```
+
+### Topic Analysis Missing Dependencies
+
+**Problem:** "ModuleNotFoundError: No module named 'plotly'"
+- **Solution:** Install topic analysis dependencies
+  ```bash
+  pip install plotly scipy matplotlib pandas
+  ```
+
+### Topic Analysis No Data Found
+
+**Problem:** "No snapshot data found for company 'Meta'"
+- **Cause:** No snapshot JSONs exist in `companies/Meta/` directory
+- **Solution:** Run data pull first:
+  ```bash
+  python pull_and_import.py --companies Meta
+  python topic_analysis.py --company Meta --window 180d
   ```
 
 ---
